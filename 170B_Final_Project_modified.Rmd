@@ -1,0 +1,435 @@
+---
+title: "Applying Risk Parity to Stacked Regressions in Supervised Learning"
+author: "Caiyi Zhang, Chenkuan Liu"
+date: "May 28, 2018"
+output:
+  pdf_document:
+    df_print: kable
+    fig_caption: yes
+    fig_height: 5
+    fig_width: 4
+  html_document:
+    df_print: paged
+geometry: margin=1in
+indent: yes
+fontsize: 12pt
+documentclass: report
+---
+
+```{r include=FALSE}
+library(mlbench)
+library(caret)
+library(glmnet)
+library(tidyverse)
+library(broom)
+library(data.table)
+library(knitr)
+library(knitLatex)
+data(BostonHousing)
+```
+
+```{r include=FALSE}
+opts_chunk$set(echo=FALSE,
+               cache=TRUE, autodep=TRUE, cache.comments=FALSE,
+               message=FALSE, warning=FALSE)
+
+```
+## 1. Introduction
+
+\indent\indent This project mainly addresses two questions. First, we examine and compare the methods of model stacking and risk-parity in improving prediction accuracy. Second, we aim to find the optimal weight of each model used in both methods.  
+   
+  Initially proposed by Wolpert (1992), stacking is the idea that a linear combination of weak models will generally produce a better estimate in prediction. On the other hand, risk-parity in investment is to have each asset contributes equal risk to the portfolio. The data set being used is the Boston Housing data from the R package *mlbench*. The data set contains 506 observations on 14 variables, where the target variable is the median housing price. Here's a look at the data set:  
+```{r}
+head(BostonHousing)
+BostonHousing$chas <- as.numeric(BostonHousing$chas)
+```
+  Clearly, the data we are dealing with is a regression problem, so we will use the root mean squared error (RMSE) as our metric, and the method with a lower RMSE will be the better one.   
+
+## 2. Training Models with 10-Fold CV
+
+\indent\indent Randomly partition the Boston Housing data set into 5 folds. In each single process, we train the models based on four folds (this will be the training set) and use the remaining one (call it the test set) for testing. Proceed for five times so that each fold is used as a test set. This is a necessary means to prevent biases and overfitting.    
+  
+  Similarly, within each training set, we resample the data by 10-fold cross validation. The purpose is to evaluate the model performance on the out-of-sample data, namely the test sample. 10-fold cross validation will further split the training set into 10 subsets (randomly), among these one will be kept as the validation set for testing the model, the remaining 9 subsets are used for actual training. The process will repeat 10 times so that each of the ten subsamples are used exactly once as a validation set; it yields 10 results for RMSE, which will then be averaged into a single training error. According to Breiman's *Stacked Regressions*, 10-fold CV is both more computationally efficient and more accurate than leave-one-out cross validation (62). 
+  
+  In each round, we use five base models to train the data by using functions from the *caret* and *glmnet* package. Specifically, the models are linear regression (LM), ridge regression, lasso regression, classification and regression trees (CART), and support vector machines (SVM). In training LM, CART, and SVM, we preprocess the data by centering and scaling (for ridge and lasso, the function `cv.glmnet` normalizes the data automatically) to ensure units of regression coefficients are on the same scale.    
+
+## 3. Stacking with Gradient Descent
+  
+\indent\indent Let $X_i$ represent the $i^{th}$ model used in this experiment $i = 1,2,...,5$. Take a linear combination of the selected models 
+\[
+  \hat{Y}=\alpha_1X_1+\alpha_2X_2+\alpha_3X_3+\alpha_4X_4+\alpha_5X_5
+\]
+then $\hat{Y}$ represents the final predicted value, and the coefficient $\alpha_i$ is the weight of each model. 
+
+  To simplify the above, we turn it into $\hat{Y}=X\alpha$. $X$ is a $m\times5$ matrix where $m$ equals the number of cases in the training set, and the each column corresponds to Model $X_i$'s prediction on that training set. $\alpha$ is the weight vector with dimension $5\times1$, and the product $\hat{Y}$ is a $m\times1$ vector. Typically, there are no constraints on the coefficients $\alpha_i$; however, the problem being dealt with involves model stacking, and it does not make sense for $\alpha_i$ to have negative value. Although this is the case, we did not impose any constraint in our code as the selected models did not produce negative coefficients.
+
+  The objective is to find the optimal weights $\alpha_i$ such that the prediction error is minimized. That is, $\hat{Y}$ is as close to $Y$ as possible. 
+Define the cost function:
+\[
+J(\alpha) = \frac{1}{2m}\sum_{i=1}^{m}(\hat{Y}(X^{(i)})-Y^{(i)})^2
+\]
+
+  Note $i$ is each row of observation, and $m$ is the number of observations in the training sample ($m\approx404$). The $2m$ is just to make the derivative of $J(\alpha)$ look nice. 
+
+  We want to find the weight vector $\alpha$ by minimizing the cost function. In this project, the gradient descent algorithm is used to solve this problem. The algorithm has the expression
+\[
+\alpha_{i+1}=\alpha_i-\gamma J'(\alpha_i)
+\]
+
+  Here $\gamma$ is the learning rate. The algorithm will be run a number of times, and $\gamma$ is the step size we take at each iteration. Since the second term is subtracted from $\alpha_i$, this will eventually lead to a movement towards the minimum, provided that $\gamma$ is small enough and the number of iterations are sufficient.
+
+  Calculating the derivative $J'(\alpha_i)$ requires a bit more work since it involves vector calculus. We refer to the lecture notes on April 23rd and come to the result 
+\[
+\frac{dJ}{d\alpha}=\frac{1}{m}(X^tX\alpha-X^tY)
+\]
+
+  Again, $X$ is a $m\times5$ matrix, $\alpha$ is a $5\times1$ column vector, $Y$ is a $m\times1$ column vector.
+So $X^tX\alpha-X^tY$ should be a $5\times1$ column vector, which makes sense because each element in $\alpha$ corresponds to a model's weight.
+
+  Next, we apply the gradient descent function on the training sample. The function will return both the cost history and the calculated weights. To see how the weighted models perform on the test set, we use the linear function $\hat{Y}=X\alpha$ again and assign the calculated weights to $\alpha$. In addition, $X_i$ becomes the prediction made by each model on the test set, and $Y$ in the cost function is the original $medv of the test set.
+
+  Finally, take the square root of the cost function (applied on the test set) gives the RMSE of the stacked models. Repeat the process for five times so that each of the five sets is tested. Average the five RMSE and the result will indicate if stacking has improved the prediction accuracy.
+
+## 4. Finding Weights under Risk-parity
+  
+\indent\indent The idea of risk-parity can be applied to stacking models as follows: we consider different base models as "individual asset" in the portfolio, and the variance of each model represents risk. The objective is to find the models' weights such that each model contributes equally to the variance of the prediction. Expressed mathematically, each model has the same contribution $\lambda$ where 
+\[
+\lambda= \frac{w' \sum w}{n}
+\]
+In the above expression, $w$ is the weight vector, and $w' \sum w$ is the portfolio's volatility (a value). In this case, the numerator is just the standard deviation of the final prediction. $n$ equals the number of "assets," that is, the base models. (Li et al.) Similar to stacking with gradient descent, the weights are found using the training set and the process is run on each fold. For ease of comparison, we use the same cost function to calculate RMSE. The code implementation involves Newton's method and is based on the solution described in ["Efficient Algorithms for Computing Risk Parity Portfolio Weights." (Li et al.)](https://pdfs.semanticscholar.org/80ea/6bdaba7e654499c8e11ad778dae7970fd29e.pdf)
+
+## 5. Results
+  
+\indent\indent In the first part of the stacking process, we have a linear function from which we find the coefficient before each predictor variable. To solve for these coefficients, we need a cost function and an optimization algorithm (gradient descent is used in this project). From the cost function we can compute the RMSE from stacking. That is, solve for coefficients in the linear function
+\[
+  \hat{Y}=\alpha_1X_1+\alpha_2X_2+\alpha_3X_3+\alpha_4X_4+\alpha_5X_5
+\]
+\indent In the second part, we employ a similar idea to risk-parity except we impose an initial constraint that the coefficients should sum to 1 and that $\alpha_i$ is nonnegative (i.e. we consider the long option only). By definition, risk-parity requires each term $\alpha_1X_1$, $\alpha_2X_2$,..., $\alpha_5X_5$ be roughly the same. 
+  
+  In each round two RMSEs are generated--one for stacking and one for risk-parity. Since there are five rounds in total, we can get a group of five RMSEs for stacking and another group of five RMSEs for risk-parity. Compute the average of each group, and the resulting two RMSEs would be the final measure.
+  
+  Recall earlier we split the Boston Housing data into 5 folds. We train the models on four folds and use the remaining set for testing. The process will repeat 5 times until each fold has been used as the test set. For illustration purpose, we display plots and graphs for Round #1 only and the change in relevant numbers for all runs.
+```{r}
+set.seed(123)
+samples <- createFolds(BostonHousing$medv, k = 5, list = TRUE)
+data1 <- BostonHousing[samples[[1]],]
+data2 <- BostonHousing[samples[[2]],]
+data3 <- BostonHousing[samples[[3]],]
+data4 <- BostonHousing[samples[[4]],]
+data5 <- BostonHousing[samples[[5]],]
+
+train1 <- rbind(data1, data2, data3, data4)
+train2 <- rbind(data1, data2, data3, data5)
+train3 <- rbind(data1, data2, data4, data5)
+train4 <- rbind(data1, data3, data4, data5)
+train5 <- rbind(data2, data3, data4, data5)
+
+test1 <- data5
+test2 <- data4
+test3 <- data3
+test4 <- data2
+test5 <- data1
+```
+
+
+```{r}
+# These parameter values are used for later function call
+alpha <- rep(0,5)
+gamma <- 1e-5
+num_iters <- 500
+rmseStack <- c(rep(0,5))
+rmseRP <- c(rep(0,5))
+RP_iter <- c(rep(0,5))
+
+# Build cost function
+compCost <- function(X, y, alpha){
+  m <- length(y)
+  J <- sum((X %*% alpha- y)^2) / (2*m)
+  return(J)
+}
+
+# Implement gradient descent function
+gradDescent <- function(X, y, alpha, gamma, num_iters){
+  m <- length(y)
+  J_hist <- rep(0, num_iters)
+  for(i in 1:num_iters){
+    alpha <- alpha - gamma * (1/m) * (t(X) %*% (X %*% alpha - y))
+    
+    # record the cost history
+    J_hist[i]  <- compCost(X, y, alpha)
+  }
+  # store the two values
+  results<-list(alpha, J_hist)
+  return(results)
+}
+
+
+# Implement risk-parity with Newton's method
+comp_RP_PortfolioWeight <- function(sigma, num_iters, roundNum) {
+
+  # F(y), system of equations
+  eval_f <- function(x, sigma, lambda){
+    # x = weights vector, sigma = covariance matrix, lambda = a constant to be found
+    # sets up n+1 x 1 matrix of equations, where n is the amount of assets or variables
+    # and the +1 is the restriction that the weights sum to 1
+    x <- as.vector(x)
+    x <- x[1:nrow(sigma)]
+    f0 <- matrix(nrow = nrow(sigma) + 1, ncol = 1)
+    f0[1:nrow(sigma), 1] <- (sigma %*% x) - (lambda * 1/x)
+    f0[(nrow(sigma) + 1), 1] <- sum(x) - 1
+    return(f0)
+  }
+  
+  # Jacobian matrix of F(y)
+  jacob_f <- function(x, sigma, lambda){
+    # x = weights vector, sigma = covariance matrix, lambda = a constant to be found
+    # sets up n+1 x n+1 jacobian matrix of F(y)
+    x <- as.vector(x)
+    x <- x[1:nrow(sigma)]
+    g <- matrix(nrow = nrow(sigma) + 1, ncol = ncol(sigma)+1)
+    g[1:nrow(sigma), 1:ncol(sigma)] <- sigma + as.vector(lambda) * diag(1/x^2)
+    g[1:nrow(sigma), (ncol(sigma)+1)] <- -1/x
+    g[(nrow(sigma)+1), 1:ncol(sigma)] <- rep(1, ncol(sigma))
+    g[(nrow(sigma)+1), (NCOL(sigma)+1)] <- 0
+    return(g)
+  }
+  
+  # set a threshold for convergence
+  tol <- 1e-6
+  
+  for(i in 1:num_iters){
+    RP_iter[roundNum] <<- RP_iter[roundNum] + 1
+    
+    if (i == 1){
+    # first weight guess with 1/5
+        x_i <- rep(1/5, 5)
+    # lambda = portfolio standard deviation / number of assets
+        lambda <- t(x_i) %*% sigma %*% x_i / 5
+    }
+    else{
+    # all other iterations after 1st guess
+        jInv <- solve(jacob_f(c(x_i, 1), sigma, lambda))
+        Fx <- eval_f(c(x_i, 1), sigma, lambda)
+        ans <- c(x_i, 1) - jInv %*% Fx
+        
+    # if solution is found exit the loop
+        if(norm(c(x_i,1) - ans) <= tol) break
+    
+    # otherwise keep trying new weight vector guess
+        x_i <- ans[1:5]
+        lambda <- t(x_i) %*% sigma %*% x_i / 5
+    }
+  }
+  ans <- ans[1:5]
+  
+  return(ans)
+}
+```
+
+```{r}
+# 10-fold cross validation
+control <- trainControl(method='cv', number=10)
+metric <- 'RMSE'
+```
+
+```{r}
+# Function for model training and result computation, which will be called in each round
+roundOperation <- function(trainSet, testSet, roundNum, visualize = FALSE) {
+  
+# Linear Regression
+set.seed(123)
+fit.lm <- train(medv~., data=trainSet, method='lm', metric=metric, 
+                preProc=c('center', 'scale'), trControl=control)
+
+# Convert into matrix to fit the argument type required by cv.glmnet
+x <- trainSet[,-14] %>% data.matrix()
+y <- trainSet$medv
+z <- testSet[,-14] %>% data.matrix()
+
+# Choose a range of lambda values to run
+lambdas <- 10^seq(3, -3, by = -.1)
+
+# LASSO Regression 
+# Perform 10-fold cross-Validation for lasso
+cv_fit_lasso <- cv.glmnet(x, y, alpha = 1, lambda = lambdas, nfolds = 10, 
+                          standardize = TRUE, type.measure = "mse")
+
+# Plot the cross-validation curve
+if (visualize)
+  plot(cv_fit_lasso)
+
+# The value lambda that gives minimum mean cross-validated error
+opt_lambda2 <- cv_fit_lasso$lambda.min
+
+# Store the fitted model for later prediction
+fit.lasso <- cv_fit_lasso$glmnet.fit
+
+# Ridge Regression
+# Perform 10-fold cross-Validation for ridge
+cv_fit_ridge <- cv.glmnet(x, y, alpha = 0, lambda = lambdas, nfolds = 10, 
+                          standardize = TRUE, type.measure = "mse") 
+
+# Plot the cross-validation curve
+if (visualize)
+  plot(cv_fit_ridge)
+
+# The value lambda that gives minimum mean cross-validated error
+opt_lambda1 <- cv_fit_ridge$lambda.min
+
+# Store the fitted model for later prediction
+fit.ridge <- cv_fit_ridge$glmnet.fit
+
+# Compare lasso & ridge coefficients 
+ridge_coef <- cv_fit_ridge$glmnet.fit$beta[,cv_fit_ridge$glmnet.fit$lambda == opt_lambda1]
+lasso_coef <- cv_fit_lasso$glmnet.fit$beta[,cv_fit_lasso$glmnet.fit$lambda == opt_lambda2]
+coef <- data.table(lasso = lasso_coef, ridge = ridge_coef)
+
+# Classification and Regression Trees (CART)
+set.seed(123)
+grid <- expand.grid(.cp=c(0, 0.05, 0.1))
+fit.cart <- train(medv~., data=trainSet, method='rpart',
+                  metric=metric, preProc=c('center', 'scale'), 
+                  trControl=control, tuneGrid=grid)
+
+# Support Vector Machines (SVM) 
+set.seed(123)
+fit.svm <- train(medv~., data=trainSet, method='svmRadial',
+                 metric=metric, preProc=c('center', 'scale'), 
+                 trControl=control)
+
+# Use the trained model to predict both the train dataset and the test dataset
+train_lm <- predict(fit.lm)
+train_svm <- predict(fit.svm)
+train_cart <- predict(fit.cart)
+train_lasso <- predict(fit.lasso, s=opt_lambda2, newx=x)
+train_ridge <- predict(fit.ridge, s=opt_lambda1, newx=x)
+
+model_lm <- predict(fit.lm, testSet)  
+model_svm <- predict(fit.svm, testSet)  
+model_cart <- predict(fit.cart, testSet) 
+model_lasso <- predict(fit.lasso, s=opt_lambda2, newx=z)
+model_ridge <- predict(fit.ridge, s=opt_lambda1, newx=z)  
+
+set.seed(123)
+X_train <- cbind(train_lm, train_svm, train_cart, train_lasso, train_ridge)
+y_train <- trainSet$medv
+
+X_test <- cbind(model_lm, model_svm, model_cart, model_lasso, model_ridge)
+y_test <- testSet$medv
+
+# Results contain both models' weights and cost history
+results <- gradDescent(X_train, y_train, alpha, gamma, num_iters)
+
+# Plot cost history
+if (visualize) {
+  cost_hist <- results[[2]]
+  plot(1:num_iters, cost_hist, type = 'l')
+}
+
+# Sum of weights should be close to 1
+alpha <- results[[1]]
+
+# RMSE for stacking
+rmse_stack <- sqrt(compCost(X_test, y_test, alpha))
+rmseStack[roundNum] <<- rmse_stack
+
+# Format the data of stacking into a matrix to display later
+row_names <- c("lm", "svm", "cart", "lasso", "ridge", "Total W.", "RMSE")
+w_stack <- append(alpha, c(sum(alpha), rmse_stack))
+w_stack <- matrix(w_stack, ncol = 1, nrow = 7)
+dimnames(w_stack) = list(row_names, c("Stacking"))
+
+# Implement Risk-Parity
+headings <- list(NULL, c("lm", "svm", "cart", "lasso", "ridge"))
+mx_error <- matrix(ncol=5, nrow = length(trainSet$medv), dimnames = headings)
+
+for(i in 1:5) {
+   mx_error[,i] <- X_train[,i] - trainSet$medv
+ }
+
+sigma <- cov(mx_error)
+
+# weights <- optimalPortfolio(sigma, control = list(type = 'erc', constraint = 'lo'))
+
+weights <- comp_RP_PortfolioWeight(sigma, num_iters, roundNum)
+
+# Weights should sum to 1
+assertthat::are_equal(sum(weights), 1)
+
+# RMSE for risk-parity
+rmse_rp <- sqrt(compCost(X_test, y_test, weights))
+rmseRP[roundNum] <<- rmse_rp
+
+# Format the data of risk parity into a matrix to display later
+w_rp <- append(weights, c(sum(weights), rmse_rp))
+w_rp <- matrix(t(w_rp), ncol = 1, nrow = 7)
+dimnames(w_rp) = list(row_names, c("Risk Parity"))
+
+# Construct a data table to display all the information we get from stacking and risk parity
+Info <- row_names
+data.table(Info, w_stack, w_rp)
+}
+```
+
+**Round 1**
+```{r fig.align='center', warning=FALSE}
+roundOperation(trainSet = train1, testSet = test1, roundNum = 1, visualize = TRUE)
+```
+**Round 2**
+```{r echo=FALSE}
+roundOperation(trainSet = train2, testSet = test2, roundNum = 2)
+```
+**Round 3**
+```{r echo=FALSE}
+roundOperation(trainSet = train3, testSet = test3, roundNum = 3)
+```
+**Round 4**
+```{r echo=FALSE}
+roundOperation(trainSet = train4, testSet = test4, roundNum = 4)
+```
+**Round 5**
+```{r echo=FALSE}
+roundOperation(trainSet = train5, testSet = test5, roundNum = 5)
+```
+
+The average of RMSE errors from these five rounds can serve as a good indicator of the model's performance on an independent data set. When `num_iters = 500`, we can see that risk parity performs better than staking.
+```{r}
+Info <- c("Stacking", "Risk Parity")
+
+mean_rmse <- matrix(c(mean(rmseStack), mean(rmseRP)))
+dimnames(mean_rmse) = list(NULL, "Mean RMSE")
+
+rp_round <- matrix(c(num_iters, max(RP_iter)))
+dimnames(rp_round) = list(NULL, "(max) Iteration")
+data.table(Info, mean_rmse, rp_round)
+```
+
+## 6. Conclusion
+\indent\indent The above shows that stacking performs not as well as risk-parity at 500 iterations. The latter results in a smaller error. However, as the number of iterations increases, the gradient descent algorithm runs more times than before, achieving a better accuracy than risk-parity. We experiment with different iterations to see the change in RMSE (the average of five runs). Here we omit the rerunning process. After several trials, we get the values of the average RMSE with the number of iterations set to 1000, 1500, 2000, and 2500.
+
+Risk-parity is much more efficient: it converges only after several runs, which means a rather accurate solution is found in significantly fewer steps. In fact, our experiment shows the maximum iteration is around 5 or 6. Although the prediction error from stacking is lower at `num_iters > 1500`, it does so at the expense of computational efficiency. 
+
+Compared to the thousands of iterations needed under stacking, we draw the conclusion that risk-parity is much more efficient in producing a rather accurate estimate. Therefore, risk-parity generally gives a better model performance than stacking.
+```{r}
+iterations <- c(500, 1000, 1500, 2000, 2500)
+stackMeanRMSE <- c(2.825847, 2.786127, 2.753257, 2.726300, 2.704414)
+rpMeanRMSE <- c(rep(2.748144, 5))
+data.table(iterations, stackMeanRMSE, rpMeanRMSE)
+```
+
+## 7. Remarks
+\indent\indent As shown above, the number of iteration is 1500, the RMSE of risk parity is smaller than that of stacking by 0.005. And when the number of iteration reaches 2000 or even higher, stacking becomes better than risk-parity. Since the latter converges in a few steps, change in iterations will not further reduce RMSE.
+
+  Even though a better result is achieved through stacking by simply raising the number of iterations, the running time would also increase accordingly. Moreover, from the `cost_hist` graph, we observe that when the number of iteration is above 200, the function almost looks like a horizontal line, which means a significant amount of iterations is needed to lower a tiny bit of the stacking RMSE.
+
+  In sum, whether stacking or risk-parity wins in terms of prediction accuracy depends on the iterations of stacking. Although at `num_iters=2500` or a more extreme value will continue lowering the RMSE value, it can be time-consuming, especially when the data set is large. As for risk-parity, a fairly accurate solution is found in less than 10 iterations. 
+
+## 8. References  
+\indent\indent Breiman, L. (1996). *Stacked Regressions*. Machine Learning, 24(1), 49-64. doi:10.1007/bf00117832
+
+Ng, A. (n.d.). *CS229Lecturenotes - Machine learning*. (n.d.). cs229.stanford.edu/notes/cs229-notes1.pdf
+  
+Risk parity. (2018, April 30). en.wikipedia.org/wiki/Risk_parity
+
+Li, F., Chaves, D. B., Hsu, J. C., & Shakernia, O. (2012, July). *Efficient Algorithms for Computing Risk Parity Portfolio Weights* Retrieved June 4, 2018. pdfs.semanticscholar.org/80ea/6bdaba7e654499c8e11ad778dae7970fd29e.pdf
+
